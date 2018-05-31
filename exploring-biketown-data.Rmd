@@ -1,0 +1,45 @@
+---
+title: "Exploring BikeTown Data"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+if (!require(sp)) {
+  install.packages("sp")
+  library(sp)
+}
+if (!require(sf)) {
+  install.packages("sf")
+  library(sf)
+}
+if (!require(tmap)) {
+  install.packages("tmap")
+  library(tmap)
+}
+```
+
+```{r}
+trip_summary <- biketown_cleaned %>% group_by(StartHub, EndHub) %>% 
+  summarize(
+    trips = n(),
+    median_miles = median(Distance_Miles),
+    iqr_miles = IQR(Distance_Miles),
+    median_minutes = median(duration_minutes),
+    iqr_minutes = IQR(duration_minutes)) %>% 
+  mutate(start_equals_end = (StartHub == EndHub)) %>% 
+  arrange(desc(trips))
+
+```
+
+## Geotag the hubs
+```{r}
+biketown_hubs_sp <- SpatialPointsDataFrame(
+    coords = select(biketown_hubs, longitude, latitude),
+    data = biketown_hubs,
+    proj4string = CRS("+init=epsg:4326")
+  )
+biketown_hubs_sf <- st_as_sf(biketown_hubs_sp)
+```
+
