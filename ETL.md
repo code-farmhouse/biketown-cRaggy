@@ -1,33 +1,109 @@
 ETL
 ================
 
-GitHub Documents
-----------------
-
-This is an R Markdown format used for publishing markdown documents to GitHub. When you click the **Knit** button all R code chunks are run and a markdown file (.md) suitable for publishing to GitHub is generated.
-
-Including Code
---------------
-
-You can include R code in the document as follows:
+Download the raw data
+---------------------
 
 ``` r
-summary(cars)
+dir.create("~/Raw", recursive = TRUE)
 ```
 
-    ##      speed           dist       
-    ##  Min.   : 4.0   Min.   :  2.00  
-    ##  1st Qu.:12.0   1st Qu.: 26.00  
-    ##  Median :15.0   Median : 36.00  
-    ##  Mean   :15.4   Mean   : 42.98  
-    ##  3rd Qu.:19.0   3rd Qu.: 56.00  
-    ##  Max.   :25.0   Max.   :120.00
+    ## Warning in dir.create("~/Raw", recursive = TRUE): '/home/znmeb/Raw' already
+    ## exists
 
-Including Plots
----------------
+``` r
+url <- 
+  "https://s3.amazonaws.com/biketown-tripdata-public/BiketownPublicTripData201804.zip"
+destfile <- "~/Raw/BiketownPublicTripData201804.zip"
+download(url, destfile)
+unzip(destfile, exdir = "~/Raw", overwrite = TRUE)
+```
 
-You can also embed plots, for example:
+Concatenate the files
+---------------------
 
-![](ETL_files/figure-markdown_github/pressure-1.png)
+``` r
+csv_files <- list.files("~/Raw/PublicTripData", full.names = TRUE) %>% 
+  grep(pattern = ".csv", value = TRUE)
+biketown_raw <- tibble()
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+for (file in csv_files) {
+  biketown_raw <- biketown_raw %>% bind_rows(read_csv(
+    file,
+    progress = FALSE,
+    col_types = cols(
+      .default = col_character(),
+      StartLatitude = col_double(),
+      StartLongitude = col_double(),
+      StartDate = col_date(format = "%m/%d/%Y"),
+      StartTime = col_time(format = "%H:%M"),
+      EndLatitude = col_double(),
+      EndLongitude = col_double(),
+      EndDate = col_date(format = "%m/%d/%Y"),
+      EndTime = col_time(format = "%H:%M"),
+      Distance_Miles = col_double())))
+}
+```
+
+Clean the data
+--------------
+
+``` r
+biketown_cleaned <- biketown_raw %>% 
+  filter(
+    !is.na(StartLatitude),
+    !is.na(EndLatitude),
+    !is.na(Duration),
+    !is.na(Distance_Miles)) %>% 
+  mutate(duration_minutes = as.numeric(
+    as.duration(hms(Duration)), "minutes"))
+```
+
+Make up hub names for the ones that have "NA"
+---------------------------------------------
+
+Some of the trips don't start or end at a hub. They'll have "NA" for a hub name. So we create a hub name from the longitude and latitude and use that.
+
+``` r
+start_coords <- paste(
+  "GPS(",
+  biketown_cleaned$StartLongitude,
+  ",",
+  biketown_cleaned$StartLatitude,
+  ")", sep = ""
+)
+end_coords <- paste(
+  "GPS(",
+  biketown_cleaned$EndLongitude,
+  ",",
+  biketown_cleaned$EndLatitude,
+  ")", sep = ""
+)
+biketown_cleaned$StartHub <- ifelse(
+  is.na(biketown_cleaned$StartHub),
+  start_coords,
+  biketown_cleaned$StartHub
+)
+biketown_cleaned$EndHub <- ifelse(
+  is.na(biketown_cleaned$EndHub),
+  end_coords,
+  biketown_cleaned$EndHub
+)
+```
+
+Make tables of unique end points
+--------------------------------
+
+``` r
+start_hubs <- biketown_cleaned %>% select(
+  hub = StartHub,
+  longitude = StartLongitude,
+  latitude = StartLatitude
+) %>% unique()
+end_hubs <- biketown_cleaned %>% select(
+  hub = EndHub,
+  longitude = EndLongitude,
+  latitude = EndLatitude
+) %>% unique()
+biketown_hubs <- bind_rows(start_hubs, end_hubs) %>% unique()
+```
