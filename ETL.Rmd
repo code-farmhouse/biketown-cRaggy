@@ -14,21 +14,31 @@ if (!require(tidyverse)) {
   library(tidyverse)
 }
 library(lubridate)
+if (!require(sp)) {
+  install.packages("sp")
+  library(sp)
+}
+if (!require(sf)) {
+  install.packages("sf")
+  library(sf)
+}
 
 ```
 
 ## Download the raw data
+We create a directory `~/Raw` to hold our working files This is a convention I've adopted for no good reason. Then we download the zipfile and unpack it.
 ```{r}
 dir.create("~/Raw", recursive = TRUE)
 url <- 
   "https://s3.amazonaws.com/biketown-tripdata-public/BiketownPublicTripData201804.zip"
 destfile <- "~/Raw/BiketownPublicTripData201804.zip"
-download(url, destfile)
+download(url, destfile, quiet = TRUE)
 unzip(destfile, exdir = "~/Raw", overwrite = TRUE)
 
 ```
 
 ## Concatenate the files
+This is straightforward - we create an empty tibble, read each file with `read_csv` and append it to the tibble with `bind_rows`.
 ```{r}
 csv_files <- list.files("~/Raw/PublicTripData", full.names = TRUE) %>% 
   grep(pattern = ".csv", value = TRUE)
@@ -54,29 +64,75 @@ for (file in csv_files) {
 ```
 
 ## Clean the data
+The raw data has a lot of NAs; some whole rows are totally empty. So we get rid of those rows.
 ```{r}
 biketown_cleaned <- biketown_raw %>% 
   filter(
     !is.na(StartLatitude),
     !is.na(EndLatitude),
     !is.na(Duration),
-    !is.na(Distance_Miles)) %>% 
-  mutate(duration_minutes = as.numeric(
-    as.duration(hms(Duration)), "minutes"))
+    !is.na(Distance_Miles))
+
+```
+
+We want to do some sanity checking, so we compute the trip durations in hours and the average velocity in miles per hour.
+```{r}
+biketown_cleaned <- biketown_cleaned %>% mutate(
+  duration_hours = as.numeric(
+    as.duration(hms(Duration)), "hours"),
+  mph = Distance_Miles / duration_hours)
+
+```
+
+## Get rid of outliers
+Inspecting the data, there are some points that are clearly bogus. For one thing, nine trips end in the future - '2080-01-05'! Here's what they look like.
+```{r}
+long_trips <- biketown_cleaned %>% 
+  top_n(20, duration_hours) %>%
+  mutate(days = duration_hours / 24) %>% 
+  select(RouteID, duration_hours, days, StartDate, EndDate) %>% 
+  arrange(desc(days))
+options(tibble.print_max = 20, tibble.print_min = 20)
+long_trips
+
+```
+
+I'll have more to say about that 8-day trip (RouteID 2719516) later. For now, just filter out the trips that end in the future.
+```{r}
+biketown_cleaned <- biketown_cleaned %>% filter(EndDate != '2080-01-05')
+```
+
+Now let's look at the distances. Or rather, the velocities. Were there trips that required superhuman pedaling?
+```{r}
+high_velocities <- biketown_cleaned %>% 
+  top_n(20, mph) %>% 
+  select(RouteID, mph, Distance_Miles, duration_hours) %>% 
+  arrange(desc(mph))
+high_velocities
+
+```
+
+Those distances around 5250 miles are very suspicious. There are 5280 feet in a mile; perhaps the bike was measuring feet instead of miles, or somebody left a divide out in some code. Who knows?
+
+What about that trip of 1429.65 miles? I'd buy a burst of 79 MPH downhill, but sustained over 18 hours? Nope! A side note on that trip - it starts at Director Park in downtown Portland and ends - wait for it - in the Pacific Ocean, west of Vancouver Island, British Columbia, Canada. Nope!
+
+I'll buy a burst of 66 MPH in a minute and a half. So we'll insist that trips average under 70 MPH.
+```{r}
+biketown_cleaned <- biketown_cleaned %>% filter(mph < 70)
 
 ```
 
 ## Make up hub names for the ones that have "NA"
 Some of the trips don't start or end at a hub. They'll have "NA" for a hub name. So we create a hub name from the longitude and latitude and use that.
 ```{r}
-start_coords <- paste(
+.start_coords <- paste(
   "GPS(",
   biketown_cleaned$StartLongitude,
   ",",
   biketown_cleaned$StartLatitude,
   ")", sep = ""
 )
-end_coords <- paste(
+.end_coords <- paste(
   "GPS(",
   biketown_cleaned$EndLongitude,
   ",",
@@ -85,29 +141,38 @@ end_coords <- paste(
 )
 biketown_cleaned$StartHub <- ifelse(
   is.na(biketown_cleaned$StartHub),
-  start_coords,
+  .start_coords,
   biketown_cleaned$StartHub
 )
 biketown_cleaned$EndHub <- ifelse(
   is.na(biketown_cleaned$EndHub),
-  end_coords,
+  .end_coords,
   biketown_cleaned$EndHub
 )
+
 ```
 
-## Make tables of unique end points
+## Make table of unique end points
+The geospatial processing we want to do on this dataset requires a list of the end points and their coordinates. This chunk creates that table.
 ```{r}
-start_hubs <- biketown_cleaned %>% select(
+.start_hubs <- biketown_cleaned %>% select(
   hub = StartHub,
   longitude = StartLongitude,
   latitude = StartLatitude
 ) %>% unique()
-end_hubs <- biketown_cleaned %>% select(
+.end_hubs <- biketown_cleaned %>% select(
   hub = EndHub,
   longitude = EndLongitude,
   latitude = EndLatitude
 ) %>% unique()
-biketown_hubs <- bind_rows(start_hubs, end_hubs) %>% unique()
+biketown_hubs <- bind_rows(.start_hubs, .end_hubs) %>% unique()
+
+biketown_hubs_sp <- SpatialPointsDataFrame(
+    coords = select(biketown_hubs, longitude, latitude),
+    data = biketown_hubs,
+    proj4string = CRS("+init=epsg:4326")
+  )
+biketown_hubs_sf <- st_as_sf(biketown_hubs_sp)
 
 ```
 
