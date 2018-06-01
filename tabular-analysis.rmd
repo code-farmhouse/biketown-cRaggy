@@ -1,0 +1,219 @@
+---
+title: "cRaggy BikeTown Notebook"
+output:
+  html_document:
+    df_print: paged
+---
+
+# Step 1 - IMPORT LIBRARIES
+```{r Import Libraries, include=FALSE}
+libs <- c("jsonlite", "ggplot2", "ggmap", "maps", "mapdata", "plyr", "dplyr", "rgdal", "psych", "readr")
+lapply(libs, require, character.only = TRUE)
+```
+
+
+
+# Step 2 - IMPORT RAW DATA
+## PDX BikeTown GBFS Headers
+```{r Import PDX BikeTown GBFS Headers, include=FALSE}
+stations_info_response <- fromJSON("http://biketownpdx.socialbicycles.com/opendata/station_information.json")
+stations_info <- stations_info_response$data$stations
+
+stations_status_response <- fromJSON("http://biketownpdx.socialbicycles.com/opendata/station_status.json")
+stations_status <- stations_status_response$data$stations
+
+free_bikes_status_response <- fromJSON("http://biketownpdx.socialbicycles.com/opendata/free_bike_status.json")
+free_bikes_status <- free_bikes_status_response$data$bikes
+
+system_hours_response <- fromJSON("http://biketownpdx.socialbicycles.com/opendata/system_hours.json")
+system_hours <- system_hours_response$data$rental_hours
+
+system_calendar_response <- fromJSON("http://biketownpdx.socialbicycles.com/opendata/system_calendar.json")
+system_calendar <- system_calendar_response$data$calendars
+
+system_regions_response <- fromJSON("http://biketownpdx.socialbicycles.com/opendata/system_regions.json")
+system_regions <- system_regions_response$data$regions
+
+system_pricing_plans_response <- fromJSON("http://biketownpdx.socialbicycles.com/opendata/system_pricing_plans.json")
+system_pricing_plans <- system_pricing_plans_response$data$plans
+
+# last I checked, system_alerts was empty
+#system_alerts_response <- fromJSON("http://biketownpdx.socialbicycles.com/opendata/system_alerts.json")
+#system_alerts <- system_alerts_response$data$alerts
+```
+
+
+## PDX BikeTown History
+```{r Import PDX BikeTown History, include=FALSE}
+cleaned_biketown_history <- read_csv("pdxdata/cleaned_biketown.csv",
+                                  col_types = cols(duration = col_character(),
+                                  end_time = col_character(), start_time = col_character()))
+```
+
+## PDX Neighborhoods
+```{r Import PDX Neighborhoods, include=FALSE}
+download.file(url = "https://opendata.arcgis.com/datasets/cd78700c5c5c4a338090ce4c7b996f03_3.geojson", destfile = "pdx_neighborhoods.geojson")
+pdx_neighborhoods <- readOGR(dsn = "pdx_neighborhoods.geojson", layer="OGRGeoJSON")
+```
+
+## Bring in NYC Data for Comparison
+```{r Import NYC History, include=FALSE}
+pdx_years <- c("201607", "201608", "201609", "201610", "201611", "201612", "201701", "201702", "201703", "201704", "201705", "201706", "201707", "201708", "201709", "201710", "201711", "201712", "201801", "201802", "201803")
+
+# Download the files
+l_ply( .data = pdx_years,
+       .fun = function(filedate){
+           if (startsWith(filedate, "2016")){
+              furl <- paste("https://s3.amazonaws.com/tripdata/", filedate, "-citibike-tripdata.zip", sep="")
+            }
+            else {
+              furl <- paste("https://s3.amazonaws.com/tripdata/", filedate, "-citibike-tripdata.csv.zip", sep="")
+            }
+            temp <- tempfile()
+            download.file(url = furl, temp)
+            unzip(temp, exdir="nycdata")
+            unlink(temp)
+       }
+)
+
+#Combine them with plyr
+file_columns <- c("tripduration", "starttime", "stoptime", "start station id", "start station name", "end station id", "end station name", "bikeid", "usertype")
+NYCData <- ldply( .data = list.files(path="nycdata", pattern="*.csv", full.names=TRUE),
+                  .fun = function(filename) {
+                          read_csv(filename,
+                             col_types = cols(`birth year` = col_skip(), 
+                                              `end station latitude` = col_skip(), 
+                                              `end station longitude` = col_skip(), 
+                                              gender = col_skip(), 
+                                              `start station latitude` = col_skip(), 
+                                              `start station longitude` = col_skip(), 
+                                              starttime = col_datetime(format = "%m/%d/%Y %H:%M:%S"), 
+                                              stoptime = col_datetime(format = "%m/%d/%Y %H:%M:%S")
+                                          )
+                          )
+                        }
+                )
+```
+
+
+
+# Step 3 - Data Analysis
+## 3A - Stations Info
+### Describe the Data
+#### Size the Data
+```{r Describe the Data}
+dim(stations_info)
+head(stations_info)
+tail(stations_info)
+```
+
+#### Get Column Types
+```{r}
+sapply(stations_info, class)
+```
+
+### View the Data
+#### head
+```{r}
+head(stations_info)
+```
+#### tail
+```{r}
+tail(stations_info)
+```
+
+### Visualize the Data
+#### Map Portland and the stations
+```{r Mapping, message=FALSE, warning=TRUE}
+ggplot() + geom_polygon(data=pdx_neighborhoods, aes(x=long, y=lat, group=group, color="blue")) + geom_point(data=stations_info, aes(x=lon, y=lat), color="blue")
+```
+
+
+
+## 3B - Stations Status
+### Size the Data
+```{r}
+dim(stations_status)
+```
+### Get Column Types
+```{r}
+sapply(stations_status, class)
+```
+
+### View the Data
+#### head
+```{r}
+head(stations_status)
+```
+
+#### tail
+```{r}
+tail(stations_status)
+```
+
+### Join together stations with their statuses
+```{r}
+stations <- merge(stations_info, stations_status, by = "station_id")
+stations
+```
+
+### Analyze the Merged Data Frame
+#### List station Availability
+```{r}
+CurrentAvailabilityPDX <- ddply(.data = stations, .fun = count, .variables = c("name", "num_bikes_available", "num_docks_available"))
+CurrentAvailabilityPDX[order(-CurrentAvailabilityPDX$num_bikes_available),]
+```
+#### Plot station Availability
+```{r}
+pdx_bike_availability <- subset(CurrentAvailabilityPDX[CurrentAvailabilityPDX$num_bikes_available > 12,], select=c("name", "num_bikes_available"))
+g <- ggplot(pdx_bike_availability, aes(x=reorder(pdx_bike_availability$name, -pdx_bike_availability$num_bikes_available), y=pdx_bike_availability$num_bikes_available))
+g + geom_bar(fill="steelblue", stat="identity", width=.5) + theme(axis.text.x = element_text(angle = 45, hjust = 1)) + labs(x = "Stations", y = "Number of Bikes Available")
+```
+
+
+
+
+## 3C - Free Bikes
+```{r Free Bikes - head}
+head(free_bikes_status)
+```
+```{r Free Bikes - dim}
+dim(free_bikes_status)
+```
+
+
+## 3D - System Hours
+```{r}
+
+```
+
+
+## 3E - System Calendar
+```{r}
+
+```
+
+
+## 3F - System Regions
+```{r}
+
+```
+
+
+## 3G - System Pricing Plans
+```{r}
+
+```
+
+
+## 3H - BikeTown History
+```{r}
+cleaned_biketown_history
+```
+
+
+
+
+# Step 4 - Shiny Visuals
+
+
